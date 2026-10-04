@@ -1,0 +1,27 @@
+# Build output
+build/
+*.o
+*.a
+
+# ROM images: copyrighted commercial software, keep them local.
+# The emulator is run as `./build/fc_game <your-rom>.nes`.
+*.nes
+*.NES
+*.fds
+*.unf
+*.unif
+
+# Battery-backed cartridge saves written next to the ROM
+*.sav
+*.SAV
+
+# Screenshots and state dumps produced by the F8 hotkey
+fc_game_shot_*.bmp
+fc_game_shot_*.txt
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+compile_commands.json
+.cache/
