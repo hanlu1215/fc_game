@@ -153,7 +153,7 @@ void formatOperand(const Tracer& t, u16 addr, const OpInfo& oi, char* out, size_
     const u8 a2 = t.peek(static_cast<u16>(addr + 2));
     const u16 abs = static_cast<u16>(a1 | (a2 << 8));
     switch (oi.mode) {
-        case IMP: snprintf(out, n, ""); break;
+        case IMP: out[0] = '\0'; break;
         case ACC: snprintf(out, n, "A"); break;
         case IMM: snprintf(out, n, "#$%02X", a1); break;
         case ZP:  snprintf(out, n, "$%02X", a1); break;
