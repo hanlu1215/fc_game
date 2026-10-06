@@ -25,6 +25,10 @@ public:
     // device buffer is full, which is what paces the whole emulator.
     void write(const float* samples, size_t n);
 
+    // Linear gain on the output, clamped to 0..1. Survives shutdown()/init().
+    void  setVolume(float v);
+    float volume() const { return volume_; }
+
     bool ok() const { return pcm_ != nullptr; }
     const std::string& error() const { return err_; }
 
@@ -42,6 +46,7 @@ private:
     int  (*pClose_)(void* pcm) = nullptr;
 
     int sampleRate_ = 44100;
+    float volume_ = 1.0f;
     std::vector<s16> buf_;     // interleaved stereo scratch
     float dcPrevIn_ = 0.0f, dcPrevOut_ = 0.0f;
     std::string err_;

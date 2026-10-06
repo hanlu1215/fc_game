@@ -26,6 +26,7 @@ struct KeyEvent {
     Key  key = Key::Unknown;
     bool pressed = false;
     bool ctrl = false;
+    bool alt = false;      // Mod1, i.e. the usual Alt key
 };
 
 // An X11 window with an XShm-backed canvas.

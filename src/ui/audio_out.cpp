@@ -69,6 +69,10 @@ void AudioOut::shutdown() {
     lib_ = nullptr;
 }
 
+void AudioOut::setVolume(float v) {
+    volume_ = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
 void AudioOut::write(const float* samples, size_t n) {
     if (!pcm_ || !pWriteI_ || n == 0) return;
 
@@ -82,7 +86,7 @@ void AudioOut::write(const float* samples, size_t n) {
         dcPrevIn_ = in;
         dcPrevOut_ = out;
 
-        float v = out * 3.0f;                   // bring it up to a usable level
+        float v = out * 3.0f * volume_;         // bring it up, then the user's level
         v = std::max(-1.0f, std::min(1.0f, v));
         const s16 s = static_cast<s16>(v * 32767.0f);
         buf_[i * 2 + 0] = s;

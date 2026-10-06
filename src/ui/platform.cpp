@@ -1,10 +1,13 @@
 #include "ui/platform.h"
 
+#include <X11/Xatom.h>   // XA_CARDINAL, for _NET_WM_PID
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
 #include <X11/extensions/XShm.h>
+
+#include <unistd.h>     // getpid, for _NET_WM_PID
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -97,6 +100,34 @@ Key keysymToKey(unsigned long ks) {
     }
 }
 
+// Names the window. WM_NAME is the old Latin-1 property; every current desktop
+// reads _NET_WM_NAME instead, and it carries UTF-8, so a ROM with a non-Latin
+// name in the title survives.
+void setWindowName(Display* dpy, Window win, const std::string& t) {
+    XStoreName(dpy, win, t.c_str());
+    const Atom netWmName = XInternAtom(dpy, "_NET_WM_NAME", False);
+    const Atom utf8      = XInternAtom(dpy, "UTF8_STRING", False);
+    XChangeProperty(dpy, win, netWmName, utf8, 8, PropModeReplace,
+                    reinterpret_cast<const unsigned char*>(t.c_str()),
+                    static_cast<int>(t.size()));
+}
+
+// Tells the desktop *which application* this window belongs to. Without it the
+// task bar and the dock have nothing to match the window against and fall back
+// to a generic "unknown application" entry.
+void setWindowClass(Display* dpy, Window win, const char* name) {
+    XClassHint hint{};
+    hint.res_name  = const_cast<char*>(name);
+    hint.res_class = const_cast<char*>(name);
+    XSetClassHint(dpy, win, &hint);
+
+    // Enough for a window manager to tie the window back to this process.
+    const Atom pidAtom = XInternAtom(dpy, "_NET_WM_PID", False);
+    const long pid = static_cast<long>(getpid());
+    XChangeProperty(dpy, win, pidAtom, XA_CARDINAL, 32, PropModeReplace,
+                    reinterpret_cast<const unsigned char*>(&pid), 1);
+}
+
 } // namespace
 
 // -------------------------------------------------------------------- init
@@ -134,7 +165,8 @@ bool Platform::init(int scale, const std::string& title) {
     win_ = impl_->win;
     if (!impl_->win) { fprintf(stderr, "创建窗口失败\n"); return false; }
 
-    XStoreName(dpy, impl_->win, title.c_str());
+    setWindowName(dpy, impl_->win, title);
+    setWindowClass(dpy, impl_->win, "fc_game");
 
     // Ask the window manager to tell us about the close button.
     impl_->wmDelete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
@@ -247,6 +279,7 @@ bool Platform::pollEvent(KeyEvent& ev) {
                 ev.key = k;
                 ev.pressed = (e.type == KeyPress);
                 ev.ctrl = (e.xkey.state & ControlMask) != 0;
+                ev.alt  = (e.xkey.state & Mod1Mask) != 0;
                 return true;
             }
             case ClientMessage:
@@ -314,7 +347,7 @@ void Platform::present() {
 }
 
 void Platform::setTitle(const std::string& t) {
-    if (impl_ && impl_->dpy) XStoreName(impl_->dpy, impl_->win, t.c_str());
+    if (impl_ && impl_->dpy) setWindowName(impl_->dpy, impl_->win, t);
 }
 
 void Platform::toggleFullscreen() {

@@ -3,7 +3,10 @@
 // The frontend is deliberately thin: it owns the window, the audio device and
 // the menus, and hands one frame at a time to the emulator core.
 
+#include <unistd.h>     // fork, setsid, isatty -- see the detach in App::run
+
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +16,7 @@
 
 #include "core/console.h"
 #include "state/savestate.h"
+#include "state/settings.h"
 #include "ui/audio_out.h"
 #include "ui/menu.h"
 #include "ui/platform.h"
@@ -70,7 +74,7 @@ bool saveBMP(const std::string& path, const u32* px, int w, int h) {
 
 enum class Screen { MainMenu, Browser, Playing, Paused };
 
-enum class MenuId { LoadRom, Quit, Resume, Save, Load, SlotPrev, SlotNext, Reset, BackToMenu };
+enum class MenuId { LoadRom, Quit, Resume, Save, Load, Volume, Reset, BackToMenu };
 struct MenuItem { MenuId id; std::string label; };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +93,7 @@ private:
     int    mainSel_ = 0;
     int    pauseSel_ = 0;
     int    slot_ = 0;
+    Settings settings_;         // survives a restart; currently just the volume
     bool   paused_ = false;
     bool   showHelp_ = false;
 
@@ -120,6 +125,12 @@ private:
     void toast(const std::string& msg);
     bool toastActive() const;
 
+    // ---- pause menu -------------------------------------------------------
+    // One list, shared by the drawing code and the key handler, so the two can
+    // never disagree about the order or the meaning of an entry.
+    std::vector<MenuItem> pauseItems();
+    void setVolume(int percent);
+
     // ---- drawing ----------------------------------------------------------
     void draw();
     void drawMainMenu();
@@ -141,7 +152,7 @@ private:
     void dumpDebugState(const std::string& path);
 
     // ---- frame pacing -----------------------------------------------------
-    void pace(bool ranFrame);
+    void pace();
 };
 
 // ---------------------------------------------------------------------------
@@ -168,8 +179,20 @@ bool App::initAll(const std::string& title) {
         fprintf(stderr, "警告: 未找到可用的中文字体，界面回退为英文点阵字体\n");
     }
 
+    // The volume the player last chose, or -- on a first run, before there is
+    // anything saved -- the FC_VOLUME default. From then on the menu owns it
+    // and each change is written straight back out.
+    settings_.load();
+    if (!settings_.hasVolume()) {
+        if (const char* env = getenv("FC_VOLUME")) {
+            const int v = atoi(env);
+            if (v >= 0 && v <= 100) settings_.setVolume(v);
+        }
+    }
+    audio_.setVolume(settings_.volume() / 100.0f);
+
     if (audio_.init(AUDIO_RATE)) {
-        fprintf(stderr, "音频: 已打开 44100Hz 立体声输出\n");
+        fprintf(stderr, "音频: 已打开 44100Hz 立体声输出，音量 %d%%\n", settings_.volume());
     } else {
         fprintf(stderr, "警告: 音频不可用（%s），将静音运行\n", audio_.error().c_str());
     }
@@ -276,6 +299,15 @@ void App::handleKey(const KeyEvent& e) {
         default: break;
     }
 
+    // Alt+1..4 drops a save into that slot, Ctrl+1..4 loads it back. Both are
+    // meant to be used mid-game, so they work on any screen.
+    if ((e.alt || e.ctrl) && e.key >= Key::Num1 && e.key <= Key::Num4) {
+        slot_ = static_cast<int>(e.key) - static_cast<int>(Key::Num1);
+        if (e.alt) doSaveState();
+        else       doLoadState();
+        return;
+    }
+
     if (e.ctrl) {
         switch (e.key) {
             case Key::Q: plat_.shutdown(); std::exit(0);
@@ -347,25 +379,36 @@ void App::handleMenuKey(const KeyEvent& e) {
     }
 
     if (screen_ == Screen::Paused) {
-        const int n = 8;
+        const std::vector<MenuItem> items = pauseItems();
+        const int n = static_cast<int>(items.size());
+        pauseSel_ %= n;                     // stay valid if the list ever changes
         if (k == Key::Up)   pauseSel_ = (pauseSel_ + n - 1) % n;
         if (k == Key::Down) pauseSel_ = (pauseSel_ + 1) % n;
-        if (k == Key::Left)  { slot_ = (slot_ + 3) % 4; toast(T("存档槽位 ", "Slot ") + std::to_string(slot_ + 1)); }
-        if (k == Key::Right) { slot_ = (slot_ + 1) % 4; toast(T("存档槽位 ", "Slot ") + std::to_string(slot_ + 1)); }
+
+        const MenuId sel = items[pauseSel_].id;
+
+        // Left/Right act on the highlighted entry when it carries a value, and
+        // keep their old meaning -- the save slot -- for everything else.
+        if (k == Key::Left || k == Key::Right) {
+            if (sel == MenuId::Volume) {
+                setVolume(settings_.volume() + (k == Key::Right ? 5 : -5));
+            } else {
+                slot_ = (slot_ + (k == Key::Right ? 1 : 3)) % 4;
+                toast(T("存档槽位 ", "Slot ") + std::to_string(slot_ + 1));
+            }
+        }
 
         if (k == Key::Escape) { screen_ = Screen::Playing; return; }
 
         if (k == Key::Enter) {
-            switch (pauseSel_) {
-                case 0: screen_ = Screen::Playing; break;
-                case 1: doSaveState(); break;
-                case 2: doLoadState(); break;
-                case 3: slot_ = (slot_ + 3) % 4; break;
-                case 4: slot_ = (slot_ + 1) % 4; break;
-                case 5: doReset(); screen_ = Screen::Playing; break;
-                case 6: screen_ = Screen::MainMenu; break;
-                case 7: plat_.shutdown(); std::exit(0); break;
-                default: break;
+            switch (sel) {
+                case MenuId::Resume:     screen_ = Screen::Playing; break;
+                case MenuId::Save:       doSaveState(); break;
+                case MenuId::Load:       doLoadState(); break;
+                case MenuId::Reset:      doReset(); screen_ = Screen::Playing; break;
+                case MenuId::BackToMenu: screen_ = Screen::MainMenu; break;
+                case MenuId::Quit:       plat_.shutdown(); std::exit(0); break;
+                default: break;         // Volume and LoadRom have no Enter action
             }
         }
         return;
@@ -457,6 +500,34 @@ void App::drawBrowser() {
                  kDim, 16);
 }
 
+std::vector<MenuItem> App::pauseItems() {
+    const bool hasSave = haveRom_ && SaveState::exists(con_.cartridge(), slot_);
+    const std::string slotLabel = T("槽位 ", "Slot ") + std::to_string(slot_ + 1);
+    const std::string saveLabel = T("存档", "Save state") + "  [" + slotLabel + "]";
+    const std::string loadLabel = T("读档", "Load state") + std::string("  [")
+                                + (hasSave ? T("有存档", "exists") : T("空", "empty")) + "]";
+    const std::string volLabel  = T("音量", "Volume") + "  [" + std::to_string(settings_.volume()) + "%]";
+
+    return {
+        { MenuId::Resume,     T("继续游戏", "Resume") },
+        { MenuId::Save,       saveLabel },
+        { MenuId::Load,       loadLabel },
+        { MenuId::Volume,     volLabel },
+        { MenuId::Reset,      T("重置游戏", "Reset") },
+        { MenuId::BackToMenu, T("返回主菜单", "Back to main menu") },
+        { MenuId::Quit,       T("退出程序", "Quit") },
+    };
+}
+
+void App::setVolume(int percent) {
+    const int before = settings_.volume();
+    settings_.setVolume(percent);               // clamps
+    audio_.setVolume(settings_.volume() / 100.0f);
+    // Only touch the disk when the number actually moved, so holding the key
+    // down (X auto-repeat) does not rewrite the file over and over.
+    if (settings_.volume() != before) settings_.save();
+}
+
 void App::drawPauseMenu() {
     u32* cv = plat_.canvas();
     const int cw = plat_.canvasW(), ch = plat_.canvasH();
@@ -467,27 +538,12 @@ void App::drawPauseMenu() {
         cv[i] = (((c >> 16 & 0xFF) / 3) << 16) | (((c >> 8 & 0xFF) / 3) << 8) | ((c & 0xFF) / 3);
     }
 
-    const int w = 480, h = 60 + 8 * 46, x = (cw - w) / 2, y = (ch - h) / 2;
+    const std::vector<MenuItem> items = pauseItems();
+    const int w = 480, h = 60 + static_cast<int>(items.size()) * 46;
+    const int x = (cw - w) / 2, y = (ch - h) / 2;
     ui::drawPanel(cv, cw, ch, x, y, w, h, kPanel, kBorder);
 
     drawCentered(y + 18, T("暂停", "PAUSED"), kAccent, 28);
-
-    const bool hasSave = haveRom_ && SaveState::exists(con_.cartridge(), slot_);
-    const std::string slotLabel = T("槽位 ", "Slot ") + std::to_string(slot_ + 1);
-    const std::string saveLabel = T("存档", "Save state") + "  [" + slotLabel + "]";
-    const std::string loadLabel = T("读档", "Load state") + std::string("  [")
-                                + (hasSave ? T("有存档", "exists") : T("空", "empty")) + "]";
-
-    const std::vector<MenuItem> items = {
-        { MenuId::Resume,   T("继续游戏", "Resume") },
-        { MenuId::Save,     saveLabel },
-        { MenuId::Load,     loadLabel },
-        { MenuId::SlotPrev, T("上一个槽位", "Previous slot") },
-        { MenuId::SlotNext, T("下一个槽位", "Next slot") },
-        { MenuId::Reset,    T("重置游戏", "Reset") },
-        { MenuId::BackToMenu, T("返回主菜单", "Back to main menu") },
-        { MenuId::Quit,     T("退出程序", "Quit") },
-    };
 
     for (int i = 0; i < static_cast<int>(items.size()); i++) {
         const int iy = y + 60 + i * 46;
@@ -497,7 +553,9 @@ void App::drawPauseMenu() {
         if (i == pauseSel_) text_.drawShadow(cv, cw, ch, x + 22, iy, ">", kAccent, 22);
     }
 
-    // Small hint about the running game.
+    // Small hint about the running game, plus how to work the entries that
+    // carry a value.
+    drawCentered(ch - 56, T("← → 调整所选项目的值", "← → adjust the selected value"), kDim, 16);
     const std::string rom = con_.cartridge().displayName;
     drawCentered(ch - 30, rom, kDim, 16);
 }
@@ -522,6 +580,8 @@ void App::drawHelp() {
         { "F5                存档",              "F5                Save state" },
         { "F9                读档",              "F9                Load state" },
         { "F2 / F3           切换存档槽位",      "F2 / F3           Change slot" },
+        { "Alt + 1 / 2 / 3 / 4   立即存档到该槽位", "Alt + 1 / 2 / 3 / 4   Save to that slot" },
+        { "Ctrl + 1 / 2 / 3 / 4  立即读取该槽位",   "Ctrl + 1 / 2 / 3 / 4  Load that slot" },
         { "F11               全屏切换",          "F11               Fullscreen" },
         { "F8                保存截图 (BMP)",    "F8                Save screenshot (BMP)" },
         { "F12               显示 / 隐藏帮助",   "F12               Toggle this help" },
@@ -611,11 +671,18 @@ void App::dumpDebugState(const std::string& path) {
 }
 
 // ------------------------------------------------------------------ pacing
-void App::pace(bool ranFrame) {
-    // When audio is running, the blocking device write already paces us. Only
-    // fall back to a clock when the game did not advance this iteration.
-    if (ranFrame && audio_.ok()) return;
-
+void App::pace() {
+    // Normally the audio device does the pacing: writing one frame's samples
+    // blocks until the device has room, which is exactly 1/60.0988 s. That is
+    // only true while the write really does block, though, and it can quietly
+    // stop doing so -- a device that gets reconfigured, a plugin that takes
+    // the latency setting and ignores it, an ALSA handle shared with a process
+    // that has since exited. Trusting it alone lets the loop run at whatever
+    // speed the CPU allows, which shows up as the game running fast.
+    //
+    // So hold the loop to real time as well. When the audio is doing its job
+    // the deadline has already passed and this sleep is a no-op; it only bites
+    // when the audio is not carrying its weight.
     const auto frameTime = std::chrono::microseconds(16639);   // 1 / 60.0988 s
     const auto now = std::chrono::steady_clock::now();
     if (nextFrame_.time_since_epoch().count() == 0) nextFrame_ = now;
@@ -626,11 +693,77 @@ void App::pace(bool ranFrame) {
 
 // --------------------------------------------------------------------- run
 int App::run(int argc, char** argv) {
-    const std::string initialRom = (argc > 1) ? argv[1] : std::string();
+    // The first argument that is not a flag is the ROM to load.
+    std::string initialRom;
+    bool stayAttached = false;
+    for (int i = 1; i < argc; i++) {
+        const std::string a = argv[i];
+        if (a == "-F" || a == "--foreground") stayAttached = true;
+        else if (initialRom.empty())          initialRom = a;
+    }
+
+    // Launched by hand from a shell, give the prompt back instead of holding
+    // the terminal for as long as the window is open.
+    //
+    // This has to happen *before* anything is opened. A device opened first
+    // stays shared across the fork, and an ALSA handle shared with a parent
+    // that then exits stops blocking -- which silences this process and lets
+    // the main loop spin. So the child opens the display and the sound card
+    // itself, and the parent never touches either.
+    //
+    // Scripts and pipelines are left alone (stdout is not a terminal there),
+    // as is an explicit --foreground.
+    int readyPipe = -1;
+    if (!stayAttached && isatty(STDOUT_FILENO)) {
+        int fds[2];
+        if (pipe(fds) != 0) {
+            fprintf(stderr, "无法转入后台（pipe 失败：%s），继续在前台运行\n", strerror(errno));
+        } else {
+            const pid_t pid = fork();
+            if (pid < 0) {
+                close(fds[0]);
+                close(fds[1]);
+                fprintf(stderr, "无法转入后台（fork 失败：%s），继续在前台运行\n", strerror(errno));
+            } else if (pid > 0) {
+                // Parent: wait until the child reports that it is up, so the
+                // prompt comes back to a started emulator rather than to one
+                // that is still loading. If the child dies first the pipe
+                // closes empty and we say nothing -- whatever it printed on
+                // stderr is the explanation.
+                close(fds[1]);
+                char ok = 0;
+                const ssize_t n = read(fds[0], &ok, 1);
+                close(fds[0]);
+                if (n == 1) {
+                    printf("已在后台运行（PID %d），关闭窗口即退出。\n"
+                           "想留在前台：%s -F %s\n", pid, argv[0],
+                           initialRom.empty() ? "[rom]" : initialRom.c_str());
+                }
+                fflush(stdout);
+                _exit(n == 1 ? 0 : 1);
+            } else {
+                close(fds[0]);
+                setsid();   // own session, so closing the terminal cannot kill us
+                readyPipe = fds[1];
+            }
+        }
+    }
+
     if (!initAll("fc_game")) return 1;
 
     if (!initialRom.empty()) {
         loadRom(initialRom);
+    }
+
+    // Startup is done and any warning has reached the terminal, so release the
+    // parent's prompt and go quiet from here on.
+    if (readyPipe >= 0) {
+        const char ok = 1;
+        (void)!write(readyPipe, &ok, 1);
+        close(readyPipe);
+        (void)!std::freopen("/dev/null", "r", stdin);
+        (void)!std::freopen("/dev/null", "w", stdout);
+        (void)!std::freopen("/dev/null", "w", stderr);
     }
 
     bool running = true;
@@ -651,6 +784,7 @@ int App::run(int argc, char** argv) {
 
             audioBuf_.clear();
             con_.drainAudio(audioBuf_);
+
             if (audio_.ok() && !audioBuf_.empty()) {
                 audio_.write(audioBuf_.data(), audioBuf_.size());
             }
@@ -662,7 +796,7 @@ int App::run(int argc, char** argv) {
         draw();
         plat_.present();
 
-        pace(playing);
+        pace();
     }
 
     // Persist battery-backed cartridge RAM before we go.

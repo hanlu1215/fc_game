@@ -31,6 +31,7 @@ add_executable(fc_game
     src/core/bus.cpp
     src/core/console.cpp
     src/state/savestate.cpp
+    src/state/settings.cpp
     src/ui/platform.cpp
     src/ui/audio_out.cpp
     src/ui/text.cpp
