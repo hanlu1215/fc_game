@@ -243,7 +243,7 @@ u32 CPU::step() {
         case 0x90: return branch(!flag(C));                               // BCC
         case 0x91: { u16 ad = aIzy(); write(ad, a); return 6; }
         case 0x93: { u16 ad = aIzy(); write(ad, static_cast<u8>(a & x)); return 6; } // AHX
-        case 0x94: { u16 ad = aZpy(); write(ad, y); return 4; }
+        case 0x94: { u16 ad = aZpx(); write(ad, y); return 4; }           // STY zp,X
         case 0x95: { u16 ad = aZpx(); write(ad, a); return 4; }
         case 0x96: { u16 ad = aZpy(); write(ad, x); return 4; }
         case 0x97: { u16 ad = aZpy(); write(ad, static_cast<u8>(a & x)); return 4; }

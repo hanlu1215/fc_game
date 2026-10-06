@@ -11,7 +11,7 @@
 //
 // Usage:
 //   fctrace <rom> [frames] --input right,jump [--calls [n]] [--unreached]
-//           [--dump-cov <file>]
+//           [--dump-cov <file>] [--nostart]
 //           [--callers <addr>] [--listing <addr> [count]] [--path <addr>]
 //
 // Examples:
@@ -226,13 +226,14 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr,
             "usage: %s <rom> [frames] [--input right,jump] [--calls [n]] [--unreached]\n"
+            "          [--dump-cov <file>] [--nostart]\n"
             "          [--callers <addr>] [--listing <addr> [count]] [--path <addr>]\n", argv[0]);
         return 2;
     }
 
     const std::string rom = argv[1];
     int frames = 600;
-    bool doCalls = false, doUnreached = false;
+    bool doCalls = false, doUnreached = false, pressStart = true;
     int  callsN = 30;
     u16  callersAddr = 0, listingAddr = 0, pathAddr = 0;
     int  listingN = 20;
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
             doCalls = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') callsN = atoi(argv[++i]);
         } else if (a == "--unreached") doUnreached = true;
+        else if (a == "--nostart") pressStart = false;
         else if (a == "--dump-cov" && i + 1 < argc) dumpCov = argv[++i];
         else if (a == "--callers" && i + 1 < argc) { callersAddr = (u16)strtol(argv[++i], nullptr, 16); haveCallers = true; }
         else if (a == "--listing" && i + 1 < argc) {
@@ -270,13 +272,15 @@ int main(int argc, char** argv) {
     con.cpuRef().debugHook = &Tracer::hook;
     con.cpuRef().debugHookCtx = &t;
 
-    // Boot through the title screen, then press Start.
+    // Boot through the title screen; optionally press Start to get in-game.
     for (int f = 0; f < 120; f++) con.stepFrame();
-    for (int f = 0; f < 40; f++) {
-        con.controller(0).setButton(Controller::Start, true);
-        con.stepFrame();
+    if (pressStart) {
+        for (int f = 0; f < 40; f++) {
+            con.controller(0).setButton(Controller::Start, true);
+            con.stepFrame();
+        }
+        con.controller(0).setButton(Controller::Start, false);
     }
-    con.controller(0).setButton(Controller::Start, false);
     for (int f = 0; f < frames; f++) {
         if (holdRight) con.controller(0).setButton(Controller::Right, true);
         if (jump) con.controller(0).setButton(Controller::A, (f % 28) < 18);

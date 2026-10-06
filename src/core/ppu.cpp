@@ -261,7 +261,11 @@ void PPU::evaluateSprites(int nextScanline) {
     bool overflow = false;
 
     for (int i = 0; i < 64; i++) {
-        const int row = nextScanline - oam[i * 4 + 0];
+        // An OAM Y byte holds the scanline *above* the sprite: a sprite with
+        // Y = n occupies scanlines n+1 .. n+height. Getting this off by one
+        // moves every sprite up a line, which also shifts the sprite 0 hit
+        // that games use to time mid-frame scroll splits.
+        const int row = nextScanline - oam[i * 4 + 0] - 1;
         if (row < 0 || row >= height) continue;
 
         if (spriteCount < 8) {
